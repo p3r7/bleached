@@ -1,7 +1,7 @@
 /* Sonoclast pd knobs for TeensyLC
- 
+
   * Modified by andrew for bleached (Teensy 3.2) 02/22/2019
- 
+
 
    Copyright March 2019 - havencking@gmail.com
 
@@ -33,51 +33,47 @@
    Tools > USB Type > Serial + MIDI
 */
 
-// Map MIDI CC channels to knobs numbered left to right.
-#define CC01  102
-#define CC02  103
-#define CC03  104
-#define CC04  105
-#define CC05  106
-#define CC06  107
-#define CC07  108
 
-// Map the TeensyLC pins to each potentiometer numbered left to right.
-#define POT01 0
-#define POT02 1
-#define POT03 2
-#define POT04 3
-#define POT05 4
-#define POT06 5
-#define POT07 6
+// ------------------------------------------------------------------------
+// deps
+
+// #include <EEPROM.h> // unused
+
+#include "config.h"
 
 
-// Use this MIDI channel.
-#define MIDI_CHANNEL 1
+// ------------------------------------------------------------------------
+// macros
 
-// Send MIDI CC messages for all 7 knobs after the main loop runs this many times.
-// This prevents having to twiddle the knobs to update the receiving end.
-// 10,000 loops is roughly 10 seconds.
-//#define LOOPS_PER_REFRESH 10000
+// wrap code to be executed only under DEBUG conditions in D()
+#ifdef DEBUG
+#define D(x) x
+#else
+#define D(x)
+#endif
 
-// potentiometer read parameters
-#define POT_BIT_RES         10 // 10 works, 7-16 is valid
-#define POT_NUM_READS       32 // 32 works
+
+// ------------------------------------------------------------------------
+// main
+
+bool shouldSendForcedControlUpdate = false;
+uint8_t sendForcedControlAt;
+
+IntervalTimer midiWriteTimer;
+IntervalTimer midiReadTimer;
+int midiInterval = 1000; // 1ms
+bool shouldDoMidiRead = false;
+bool shouldDoMidiWrite = false;
+bool forceMidiWrite = false;
+
 
 // Track the knob state.
+uint16_t pot_val[7] = {0xffff,
+                       0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+};
 uint16_t prev_pot_val[7] = {0xffff,
-                             0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
-                            };
-
-// an array of potentiometer pins
-uint8_t pot[7] = {POT01,
-                   POT02, POT03, POT04, POT05, POT06, POT07
-                  };
-
-// an array of CC numbers
-uint8_t cc[7] = { CC01,
-                  CC02, CC03, CC04, CC05, CC06, CC07
-                 };
+                            0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+};
 
 // Prevent jitter when reading the potentiometers.
 // Higher value is less chance of jitter but also less precision.
@@ -93,22 +89,47 @@ void setup() {
   // potentiometers
   analogReadResolution(POT_BIT_RES);
   analogReadAveraging(POT_NUM_READS);
+
+  usbMIDI.setHandleSystemExclusive(processIncomingSysex);
+
+  // MIDI.begin();
+  midiWriteTimer.begin(writeMidi, midiInterval);
+  midiReadTimer.begin(readMidi, midiInterval);
 }
 
 void loop() {
-  // Read each knob, and send MIDI CC only if the value changed.
-  for (uint8_t i = 0; i < 7; i++) {
-    uint16_t pot_val = analogRead(pot[i]);
-    if ((pot_val < prev_pot_val[i] - nbrhd) ||
-        (pot_val > prev_pot_val[i] + nbrhd)) {
-      usbMIDI.sendControlChange(cc[i], pot_val >> (POT_BIT_RES - 7), MIDI_CHANNEL);
-      prev_pot_val[i] = pot_val;
-    }
+
+  if(shouldSendForcedControlUpdate && (millis() > sendForcedControlAt)) {
+    // it's now time to send a forced control update, so...
+
+    // disable this
+    shouldSendForcedControlUpdate = false;
+
+    // this will force a write the next time the midiWrite callback fires.
+    forceMidiWrite = true;
   }
 
-  // MIDI Controllers should discard incoming MIDI messages.
-  // (reference: https://www.pjrc.com/teensy/td_midi.html)
-  while (usbMIDI.read()) { ;; }
+  // Read each knob, and send MIDI CC only if the value changed.
+  // NB: patched as current pot 7 is borked and spams noise
+  for (uint8_t i = 0; i < NB_POTS; i++) {
+    pot_val[i] = analogRead(pot[i]);
+  }
+
+  if (shouldDoMidiRead)
+  {
+    doMidiRead();
+    noInterrupts();
+    shouldDoMidiRead = false;
+    interrupts();
+  }
+
+  if (shouldDoMidiWrite)
+  {
+    doMidiWrite();
+    noInterrupts();
+    shouldDoMidiWrite = false;
+    interrupts();
+  }
 
   // Periodically send MIDI CC for every knob so that the receiving end matches the knobs
   // even when changing pure data patches.
@@ -119,4 +140,51 @@ void loop() {
 //    loop_count = 0;
 //  }
 //  loop_count++;
+}
+
+
+/*
+ * Tiny function called via interrupt
+ * (it's important to catch inbound MIDI messages even if we do nothing with
+ * them.)
+ */
+void readMidi()
+{
+  shouldDoMidiRead = true;
+}
+
+/*
+ * Function called when shouldDoMidiRead flag is HIGH
+ */
+
+void doMidiRead()
+{
+  // MIDI.read();
+  usbMIDI.read();
+}
+
+/*
+ * Tiny function called via interrupt
+ */
+void writeMidi()
+{
+  shouldDoMidiWrite = true;
+}
+
+/*
+ * The function that writes changes in slider positions out the midi ports
+ * Called when shouldDoMidiWrite flag is HIGH
+ */
+void doMidiWrite()
+{
+
+  for (uint8_t i = 0; i < NB_POTS; i++) {
+    if (((pot_val[i] < prev_pot_val[i] - nbrhd) ||
+         (pot_val[i] > prev_pot_val[i] + nbrhd)) || forceMidiWrite) {
+      usbMIDI.sendControlChange(cc[i], pot_val[i] >> (POT_BIT_RES - 7), MIDI_CHANNEL);
+      prev_pot_val[i] = pot_val[i];
+    }
+  }
+
+  forceMidiWrite = false;
 }
