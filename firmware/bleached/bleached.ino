@@ -37,7 +37,8 @@
 // ------------------------------------------------------------------------
 // deps
 
-// #include <EEPROM.h> // unused
+#include <EEPROM.h> // unused
+#include <ResponsiveAnalogRead.h>
 
 #include "config.h"
 
@@ -54,7 +55,41 @@
 
 
 // ------------------------------------------------------------------------
-// main
+// consts
+
+enum mode{CC, CC14, RPN, NRPN};
+
+
+// ------------------------------------------------------------------------
+// live conf
+
+uint8_t ch[] = { 1, 1, 1, 1,
+                 1, 1, 1 };
+
+uint8_t cc_mode = CC;
+
+uint8_t cc[] = { CC01, CC02, CC03, CC04,
+                 CC05, CC06, CC07 };
+
+uint8_t cc14[][2] = { ECC01, ECC02, ECC03, ECC04,
+                      ECC05, ECC06, ECC07 };
+
+uint16_t nrpn[] = { NRPN1, NRPN2, NRPN3, NRPN4,
+                    NRPN5, NRPN6, NRPN7 };
+
+
+// ------------------------------------------------------------------------
+// state - knobs
+
+uint16_t pot_val[] = { 0xffff, 0xffff, 0xffff, 0xffff,
+                       0xffff, 0xffff, 0xffff };
+
+uint16_t prev_pot_val[] = { 0xffff, 0xffff, 0xffff, 0xffff,
+                            0xffff, 0xffff, 0xffff };
+
+
+// ------------------------------------------------------------------------
+// state - midi state
 
 bool shouldSendForcedControlUpdate = false;
 uint8_t sendForcedControlAt;
@@ -67,35 +102,30 @@ bool shouldDoMidiWrite = false;
 bool forceMidiWrite = false;
 
 
-// Track the knob state.
-uint16_t pot_val[7] = {0xffff,
-                       0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
-};
-uint16_t prev_pot_val[7] = {0xffff,
-                            0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
-};
+// ------------------------------------------------------------------------
+// init
 
-// Prevent jitter when reading the potentiometers.
-// Higher value is less chance of jitter but also less precision.
-const uint8_t nbrhd = 5;
-
-// Count the number of main loops.
-uint16_t loop_count = 0;
+ResponsiveAnalogRead *analog_reads[NB_POTS];
 
 void setup() {
-  // serial monitoring for debugging
-  // Serial.begin(38400);
+  // Serial.begin(38400); // serial monitoring for debugging
 
-  // potentiometers
   analogReadResolution(POT_BIT_RES);
   analogReadAveraging(POT_NUM_READS);
 
-  usbMIDI.setHandleSystemExclusive(processIncomingSysex);
+  // for (uint8_t i = 0; i < NB_POTS; i++) {
+  //   analog_reads[i] = new ResonsiveAnalogRead(pot[i], true);
+  //   analog_reads[i]->setAnalogResolution(RESOLUTION);
+  // }
 
-  // MIDI.begin();
+  usbMIDI.setHandleSystemExclusive(processIncomingSysex);
   midiWriteTimer.begin(writeMidi, midiInterval);
   midiReadTimer.begin(readMidi, midiInterval);
 }
+
+
+// ------------------------------------------------------------------------
+// main loop
 
 void loop() {
 
@@ -110,38 +140,28 @@ void loop() {
   }
 
   // Read each knob, and send MIDI CC only if the value changed.
-  // NB: patched as current pot 7 is borked and spams noise
   for (uint8_t i = 0; i < NB_POTS; i++) {
     pot_val[i] = analogRead(pot[i]);
   }
 
-  if (shouldDoMidiRead)
-  {
+  if (shouldDoMidiRead) {
     doMidiRead();
     noInterrupts();
     shouldDoMidiRead = false;
     interrupts();
   }
 
-  if (shouldDoMidiWrite)
-  {
+  if (shouldDoMidiWrite) {
     doMidiWrite();
     noInterrupts();
     shouldDoMidiWrite = false;
     interrupts();
   }
-
-  // Periodically send MIDI CC for every knob so that the receiving end matches the knobs
-  // even when changing pure data patches.
-//  if (loop_count > LOOPS_PER_REFRESH) {
-//    for (uint8_t i = 0; i < 7; i++) {
-//      usbMIDI.sendControlChange(cc[i], analogRead(pot[i]) >> (POT_BIT_RES - 7), MIDI_CHANNEL);
-//    }
-//    loop_count = 0;
-//  }
-//  loop_count++;
 }
 
+
+// ------------------------------------------------------------------------
+// midi i/o
 
 /*
  * Tiny function called via interrupt
@@ -177,11 +197,50 @@ void writeMidi()
  */
 void doMidiWrite()
 {
+  uint16_t pot_val_14 = 0;
 
   for (uint8_t i = 0; i < NB_POTS; i++) {
     if (((pot_val[i] < prev_pot_val[i] - nbrhd) ||
          (pot_val[i] > prev_pot_val[i] + nbrhd)) || forceMidiWrite) {
-      usbMIDI.sendControlChange(cc[i], pot_val[i] >> (POT_BIT_RES - 7), MIDI_CHANNEL);
+
+      pot_val_14 = pot_val[i] << (14 - POT_BIT_RES);
+
+      switch (cc_mode) {
+      case CC:
+        D(Serial.println("Sending CC!"));
+
+        // usbMIDI.sendControlChange(cc[i], pot_val[i] >> (POT_BIT_RES - 7), ch[i]);
+        usbMIDI.sendControlChange(cc[i], pot_val_14 >> 7, ch[i]);
+        break;
+      case CC14:
+        D(Serial.println("Sending CC14! "));
+        D(Serial.println(String(pot_val[i])
+                         + " -> " + String(pot_val_14)
+                         + " -> " + String(pot_val_14 >> 7) + " / " + String(pot_val_14 & 0x7F) ));
+        usbMIDI.sendControlChange(cc14[i][0], pot_val_14 >> 7, ch[i]);
+        usbMIDI.sendControlChange(cc14[i][1], pot_val_14 & 0x7F, ch[i]);
+        break;
+      case RPN:
+        D(Serial.println("Sending RPN!"));
+        // - address
+        usbMIDI.sendControlChange(101, nrpn[i] >> 7, ch[i]);
+        usbMIDI.sendControlChange(100, nrpn[i] & 0x7F, ch[i]);
+        // - value
+        usbMIDI.sendControlChange(6,  pot_val_14 >> 7, ch[i]);
+        usbMIDI.sendControlChange(38, pot_val_14 & 0x7F, ch[i]);
+        break;
+      case NRPN:
+        D(Serial.println("Sending NRPN!"));
+        // - address
+        usbMIDI.sendControlChange(99, nrpn[i] >> 7, ch[i]);
+        usbMIDI.sendControlChange(98, nrpn[i] & 0x7F, ch[i]);
+        // - value
+        usbMIDI.sendControlChange(6,  pot_val_14 >> 7, ch[i]);
+        usbMIDI.sendControlChange(38, pot_val_14 & 0x7F, ch[i]);
+        break;
+      default:
+        D(Serial.println("Unexpected mode!"));
+      }
       prev_pot_val[i] = pot_val[i];
     }
   }

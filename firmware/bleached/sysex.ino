@@ -1,5 +1,8 @@
 
 
+// ------------------------------------------------------------------------
+// entrypoint
+
 void processIncomingSysex(byte* sysexData, unsigned size) {
   D(Serial.println("Ooh, sysex"));
   D(printHexArray(sysexData, size));
@@ -15,9 +18,11 @@ void processIncomingSysex(byte* sysexData, unsigned size) {
     return;
   }
 
+  uint8_t p = 0;
+  uint8_t v = 0;
 
-  if (sysexData[4] == 0x1f) {
-    // 1F = "1nFo" - please send me your current config
+  switch (sysexData[4]) {
+  case 0x1f: // 1nFo -> c0nFig
     D(Serial.println("Got an 1nFo request"));
     sendCurrentState();
 
@@ -25,12 +30,36 @@ void processIncomingSysex(byte* sysexData, unsigned size) {
     // of the controls, so the editor looks nice.
     shouldSendForcedControlUpdate = true;
     sendForcedControlAt = millis() + 1000;
-  }
+    break;
+  case 0x0e: // m0dE
+    D(Serial.println("Got a m0dE switch request"));
 
+    v = sysexData[5];
+    if (v != CC
+        && v != CC14
+        && v != NRPN) {
+      D(Serial.println("Unexpected mode, aborting!"));
+      return;
+    }
+    D(Serial.println("Switching mode " + String(v)));
+    cc_mode = v;
+
+    sendCurrentState();
+    shouldSendForcedControlUpdate = true;
+    sendForcedControlAt = millis() + 1000;
+
+    break;
+
+  default:
+    D(Serial.println("Unexpected sysex request!"));
+  }
 }
 
 
-const uint8_t SYSEX_RESP_LEN = 10+NB_POTS+NB_POTS+1;
+// ------------------------------------------------------------------------
+// c0nFig
+
+const uint8_t SYSEX_RESP_LEN = 12 + ( NB_POTS * 7) + 1;
 
 void sendCurrentState() {
   //   0F - "c0nFig" - outputs its config:
@@ -43,44 +72,54 @@ void sendCurrentState() {
 
   sysexData[3] = 0x0F; // ConFig;
 
-  sysexData[4] = DEVICE_ID; // Device 01, ie, dev board
+  sysexData[4] = DEVICE_ID;
+
   sysexData[5] = MAJOR_VERSION; // major version
   sysexData[6] = MINOR_VERSION; // minor version
   sysexData[7] = POINT_VERSION; // point version
 
-  sysexData[8] = NB_POTS;
+  sysexData[8] = MCU;
+  sysexData[9] = POT_BIT_RES;
 
-  sysexData[9] = MIDI_CHANNEL;
+  sysexData[10] = NB_POTS;
+
+  sysexData[11] = cc_mode;
+
+  int offset = 12;
+
+  // pinout
   for(int i = 0; i < NB_POTS; i++) {
-    sysexData[10+i] = cc[i];
+    sysexData[offset] = pot[i];
+    offset++;
   }
+  // ch
   for(int i = 0; i < NB_POTS; i++) {
-    sysexData[10+NB_POTS+i] = pot[i];
+    sysexData[offset] = ch[i];
+    offset++;
+  }
+  // cc
+  for(int i = 0; i < NB_POTS; i++) {
+    sysexData[offset] = cc[i];
+    offset++;
+  }
+  // 14-bit cc
+  for(int i = 0; i < NB_POTS; i++) {
+    sysexData[offset] = cc14[i][0];
+    offset++;
+    sysexData[offset] = cc14[i][1];
+    offset++;
+  }
+  // nrpn
+  for(int i = 0; i < NB_POTS; i++) {
+    sysexData[offset] = nrpn[i] >> 7;
+    offset++;
+    sysexData[offset] = nrpn[i] & 0x7F;
+    offset++;
   }
 
-  sysexData[10+NB_POTS+NB_POTS] = 0x7f;
+  sysexData[offset] = 0xF7;
 
-
-  // 	16 bytes of config flags, notably:
-  // 	LED PERMANENT
-  // 	LED DATA XFER
-  // 	ROTATE (flip+reverse)
-  //  i2c MASTER/FOLLOEWR
-  //  fadermin LSB
-  //  fadermin MSB
-  //  fadermax LSB
-  //  fadermax MSB
-  //  Soft MIDI thru
-
-  // 	16x USBccs
-  // 	16x TRSccs
-  // 	16x USBchannel
-  // 	16x TRS channel
-
-  // So that's 3 for the mfg + 1 for the message + 80 bytes
-  // can be done with a simple "read eighty bytes and send them."
-
-  D(Serial.println("Sending this data"));
+  D(Serial.println("Sending c0nFig:"));
   D(printHexArray(sysexData, SYSEX_RESP_LEN));
 
   usbMIDI.sendSysEx(SYSEX_RESP_LEN, sysexData, false);

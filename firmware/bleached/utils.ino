@@ -4,17 +4,17 @@
  * MIT License
  */
 
-// void readEEPROMArray(int start, byte buffer[], int length) {
-//   for (int i = 0; i < length; i++) {
-//     buffer[i] = EEPROM.read(start+i);
-//   }
-// }
+void readEEPROMArray(int start, byte buffer[], int length) {
+  for (int i = 0; i < length; i++) {
+    buffer[i] = EEPROM.read(start+i);
+  }
+}
 
-// void writeEEPROMArray(int start, byte buffer[], int length) {
-//   for (int i = 0; i < length; i++) {
-//     EEPROM.write(start+i, buffer[i]);
-//   }
-// }
+void writeEEPROMArray(int start, byte buffer[], int length) {
+  for (int i = 0; i < length; i++) {
+    EEPROM.write(start+i, buffer[i]);
+  }
+}
 
 void printHex(uint8_t num) {
   char hexCar[2];
